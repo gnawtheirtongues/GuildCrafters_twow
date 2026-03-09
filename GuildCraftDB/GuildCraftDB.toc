@@ -1,0 +1,8 @@
+## Interface: 11200
+## Title: GuildCraftDB
+## Author: Gatecreeper
+## Notes: Guild crafting database
+## SavedVariables: GuildCraftDB, GuildCraftDB_Meta
+
+GuildCraftSafeLib_hoverfix.lua
+GuildCraftDB.lua
