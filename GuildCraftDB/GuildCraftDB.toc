@@ -1,6 +1,7 @@
 ## Interface: 11200
 ## Title: GuildCraftDB
 ## Author: Gatecreeper
+## Version: 1.2.0
 ## Notes: Guild crafting database
 ## SavedVariables: GuildCraftDB, GuildCraftDB_Meta
 

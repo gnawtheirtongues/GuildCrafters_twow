@@ -1,6 +1,9 @@
 GuildCraftDB = GuildCraftDB or {}
 GuildCraftDB_Meta = GuildCraftDB_Meta or {}
+GuildCraftDB_Export = GuildCraftDB_Export or {}
 local SafeLower
+local NormalizeRecipeList
+local RebuildRecipeExport
 local RecipeExists
 local IsRecipeExcluded
 local IsRecipeInvalid
@@ -13,7 +16,9 @@ local guildHelloSender = CreateFrame("Frame")
 
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("TRADE_SKILL_SHOW")
+frame:RegisterEvent("TRADE_SKILL_UPDATE")
 frame:RegisterEvent("CRAFT_SHOW")
+frame:RegisterEvent("CRAFT_UPDATE")
 frame:RegisterEvent("CHAT_MSG_ADDON")
 frame:RegisterEvent("GUILD_ROSTER_UPDATE")
 
@@ -23,6 +28,8 @@ local RECIPE_SEPARATOR = "||"
 local pendingSend = nil
 local pendingGuildHello = nil
 local lastHelloTime = 0
+local pendingTradeSkillScan = nil
+local pendingCraftScan = nil
 
 local uiFrame = nil
 local uiRows = {}
@@ -31,6 +38,8 @@ local minimapButton = nil
 local ToggleUI
 local ShowRecipeTooltip
 local RefreshUI
+local ScanTradeSkill
+local ScanCraft
 
 local function GetCurrentRealmName()
     local realm = GetRealmName and GetRealmName() or nil
@@ -114,6 +123,8 @@ local EXCLUDED_PROFESSIONS = {
     ["Survival"] = true,
     ["Herbalism"] = true,
     ["Mining"] = true,
+    ["Poisons"] = true,
+    ["Poison"] = true,
 }
 
 local EXCLUDED_COOKING_RECIPES = {
@@ -192,6 +203,9 @@ SafeLower = function(text)
 end
 
 local function EnsureMetaTables()
+    GuildCraftDB = GuildCraftDB or {}
+    GuildCraftDB_Meta = GuildCraftDB_Meta or {}
+    GuildCraftDB_Export = GuildCraftDB_Export or {}
     GuildCraftDB_Meta.UI = GuildCraftDB_Meta.UI or {}
     GuildCraftDB_Meta.UI.Collapsed = GuildCraftDB_Meta.UI.Collapsed or {}
     GuildCraftDB_Meta.UI.Pos = GuildCraftDB_Meta.UI.Pos or {}
@@ -200,12 +214,17 @@ local function EnsureMetaTables()
     GuildCraftDB_Meta.Sync = GuildCraftDB_Meta.Sync or {}
     GuildCraftDB.Profiles = GuildCraftDB.Profiles or {}
     GuildCraftDB_Meta.Profiles = GuildCraftDB_Meta.Profiles or {}
+    GuildCraftDB_Export.Profiles = GuildCraftDB_Export.Profiles or {}
 end
 
 local function IsProfessionExcluded(profession)
     if not profession then
         return true
     end
+
+    profession = tostring(profession)
+    profession = string.gsub(profession, "^%s+", "")
+    profession = string.gsub(profession, "%s+$", "")
 
     return EXCLUDED_PROFESSIONS[profession] == true
 end
@@ -214,6 +233,22 @@ IsRecipeExcluded = function(profession, recipeName)
     if not profession or not recipeName then
         return false
     end
+
+    profession = tostring(profession)
+    profession = string.gsub(profession, "^%s+", "")
+    profession = string.gsub(profession, "%s+$", "")
+
+    recipeName = tostring(recipeName)
+    recipeName = string.gsub(recipeName, "|c%x%x%x%x%x%x%x%x", "")
+    recipeName = string.gsub(recipeName, "|r", "")
+    recipeName = string.gsub(recipeName, "^%s+", "")
+    recipeName = string.gsub(recipeName, "%s+$", "")
+    recipeName = string.gsub(recipeName, "~item:%d+:[^%s]*", "")
+    recipeName = string.gsub(recipeName, "~spell:%d+:[^%s]*", "")
+    recipeName = string.gsub(recipeName, "~item:%d+.*$", "")
+    recipeName = string.gsub(recipeName, "~spell:%d+.*$", "")
+    recipeName = string.gsub(recipeName, "~+$", "")
+    recipeName = string.gsub(recipeName, "%s+$", "")
 
     if profession == "Cooking" and EXCLUDED_COOKING_RECIPES[recipeName] then
         return true
@@ -256,6 +291,28 @@ local function NormalizeRecipeLookupName(recipeName)
     recipeName = string.gsub(recipeName, "^%s+", "")
     recipeName = string.gsub(recipeName, "%s+$", "")
     return recipeName
+end
+
+NormalizeRecipeList = function(recipes)
+    if type(recipes) == "table" then
+        return recipes
+    end
+
+    if type(recipes) == "string" then
+        local fixed = {}
+        local part
+
+        for part in string.gfind(recipes, "([^,]+)") do
+            part = NormalizeRecipeName(part)
+            if part and part ~= "" and not RecipeExists(fixed, part) then
+                table.insert(fixed, part)
+            end
+        end
+
+        return fixed
+    end
+
+    return {}
 end
 
 local function GetLibRecipeSpellID(professionName, recipeName)
@@ -317,11 +374,12 @@ local function SanitizeStoredRecipeNames()
 
     for player, professions in pairs(db) do
         for profession, recipes in pairs(professions) do
-            if recipes and table.getn(recipes) > 0 then
+            local recipeList = NormalizeRecipeList(recipes)
+            if recipeList and table.getn(recipeList) > 0 then
                 keptRecipes = {}
 
-                for i = 1, table.getn(recipes) do
-                    recipeName = NormalizeRecipeName(recipes[i])
+                for i = 1, table.getn(recipeList) do
+                    recipeName = NormalizeRecipeName(recipeList[i])
                     if recipeName and recipeName ~= "" and not IsRecipeExcluded(profession, recipeName) and not IsRecipeInvalid(profession, recipeName) then
                         if not RecipeExists(keptRecipes, recipeName) then
                             table.insert(keptRecipes, recipeName)
@@ -377,11 +435,12 @@ local function RemoveBrokenRecipesFromDB()
 
     for player, professions in pairs(db) do
         for profession, recipes in pairs(professions) do
-            if recipes and table.getn(recipes) > 0 then
+            local recipeList = NormalizeRecipeList(recipes)
+            if recipeList and table.getn(recipeList) > 0 then
                 keptRecipes = {}
 
-                for i = 1, table.getn(recipes) do
-                    recipeName = NormalizeRecipeName(recipes[i])
+                for i = 1, table.getn(recipeList) do
+                    recipeName = NormalizeRecipeName(recipeList[i])
                     if not IsRecipeExcluded(profession, recipeName) and not IsRecipeInvalid(profession, recipeName) then
                         table.insert(keptRecipes, recipeName)
                     else
@@ -405,11 +464,12 @@ local function RemoveExcludedRecipesFromDB()
 
     for player, professions in pairs(db) do
         for profession, recipes in pairs(professions) do
-            if recipes and table.getn(recipes) > 0 then
+            local recipeList = NormalizeRecipeList(recipes)
+            if recipeList and table.getn(recipeList) > 0 then
                 keptRecipes = {}
 
-                for i = 1, table.getn(recipes) do
-                    recipeName = recipes[i]
+                for i = 1, table.getn(recipeList) do
+                    recipeName = recipeList[i]
                     if not IsRecipeExcluded(profession, recipeName) then
                         table.insert(keptRecipes, recipeName)
                     else
@@ -559,6 +619,89 @@ local function IsPlayerOnline(playerName)
     return false
 end
 
+
+local function GetPlayerOnlineFlag(playerName)
+    local shortName = GetShortName(playerName)
+    local profileMeta = GetCurrentProfileMeta()
+
+    if profileMeta and profileMeta.Players and profileMeta.Players[shortName] and profileMeta.Players[shortName].online == 1 then
+        return 1
+    end
+
+    return 0
+end
+
+local function SortArrayAscending(values)
+    if not values then
+        return
+    end
+
+    table.sort(values, function(a, b)
+        return tostring(a) < tostring(b)
+    end)
+end
+
+RebuildRecipeExport = function()
+    EnsureMetaTables()
+    GuildCraftDB = GuildCraftDB or {}
+    GuildCraftDB_Meta = GuildCraftDB_Meta or {}
+    GuildCraftDB_Export = GuildCraftDB_Export or {}
+
+    local realm = GetCurrentRealmName()
+    local guild = GetCurrentGuildName()
+    local db = GetCurrentProfilePlayers()
+
+    GuildCraftDB_Export.Profiles = GuildCraftDB_Export.Profiles or {}
+    GuildCraftDB_Export.Profiles[realm] = GuildCraftDB_Export.Profiles[realm] or {}
+
+    local exportProfile = {
+        GeneratedAt = time(),
+        Realm = realm,
+        Guild = guild,
+        Recipes = {},
+    }
+
+    local player, professions, profession, recipes, i, recipeName
+    for player, professions in pairs(db) do
+        for profession, recipes in pairs(professions) do
+            if not IsProfessionExcluded(profession) then
+                exportProfile.Recipes[profession] = exportProfile.Recipes[profession] or {}
+
+                local recipeList = NormalizeRecipeList(recipes)
+                for i = 1, table.getn(recipeList) do
+                    recipeName = NormalizeRecipeName(recipeList[i])
+                    if recipeName and recipeName ~= "" and not IsRecipeExcluded(profession, recipeName) and not IsRecipeInvalid(profession, recipeName) then
+                        exportProfile.Recipes[profession][recipeName] = exportProfile.Recipes[profession][recipeName] or {
+                            crafters = {},
+                            online = {},
+                        }
+
+                        if not RecipeExists(exportProfile.Recipes[profession][recipeName].crafters, player) then
+                            table.insert(exportProfile.Recipes[profession][recipeName].crafters, player)
+                        end
+
+                        exportProfile.Recipes[profession][recipeName].online[player] = GetPlayerOnlineFlag(player)
+                    end
+                end
+            end
+        end
+    end
+
+    for profession, recipeTable in pairs(exportProfile.Recipes) do
+        for recipeName, entry in pairs(recipeTable) do
+            SortArrayAscending(entry.crafters)
+        end
+    end
+
+    GuildCraftDB_Export.Profiles[realm][guild] = exportProfile
+    return exportProfile
+end
+
+local function RewriteSavedVariablesNow()
+    local exportProfile = RebuildRecipeExport()
+    DEFAULT_CHAT_FRAME:AddMessage("GuildCraftDB: rebuilt recipe export for " .. exportProfile.Guild .. ". Use /reload or relog to write the WTF file to disk.")
+end
+
 local function GetColorizedPlayerName(playerName)
     local shortName = GetShortName(playerName)
     local classToken = GetPlayerClassToken(shortName)
@@ -610,7 +753,8 @@ local function BuildProfessionHash(player, profession)
         return ""
     end
 
-    return table.concat(db[player][profession], RECIPE_SEPARATOR)
+    db[player][profession] = NormalizeRecipeList(db[player][profession])
+    return table.concat(NormalizeRecipeList(db[player][profession]), RECIPE_SEPARATOR)
 end
 
 local function ShouldSendProfession(player, profession, forceSend)
@@ -661,7 +805,8 @@ local function SendChunkedProfessionData(player, profession, forceSend)
         return
     end
 
-    local recipes = db[player][profession]
+    local recipes = NormalizeRecipeList(db[player][profession])
+    db[player][profession] = recipes
     local total = table.getn(recipes)
 
     if total == 0 then
@@ -702,8 +847,15 @@ local function SendAllMyStoredProfessions(forceSend)
 
     local profession, recipes
     for profession, recipes in pairs(db[player]) do
-        if not IsProfessionExcluded(profession) and recipes and table.getn(recipes) > 0 then
+        local recipeList = NormalizeRecipeList(recipes)
+
+        if IsProfessionExcluded(profession) then
+            db[player][profession] = nil
+        elseif recipeList and table.getn(recipeList) > 0 then
+            db[player][profession] = recipeList
             SendChunkedProfessionData(player, profession, forceSend)
+        else
+            db[player][profession] = nil
         end
     end
 end
@@ -758,21 +910,88 @@ local function ScheduleProfessionSend()
     }
 
     delayedSender:SetScript("OnUpdate", function()
-        if not pendingSend then
-            return
+        if pendingSend and GetTime() >= pendingSend.time then
+            pendingSend = nil
+            SendAllMyStoredProfessions(true)
         end
 
-        if GetTime() >= pendingSend.time then
-            pendingSend = nil
+        if pendingTradeSkillScan and GetTime() >= pendingTradeSkillScan.time then
+            pendingTradeSkillScan = nil
+            ScanTradeSkill(true)
+        end
+
+        if pendingCraftScan and GetTime() >= pendingCraftScan.time then
+            pendingCraftScan = nil
+            ScanCraft(true)
+        end
+
+        if not pendingSend and not pendingTradeSkillScan and not pendingCraftScan then
             delayedSender:SetScript("OnUpdate", nil)
-            SendAllMyStoredProfessions(true)
         end
     end)
 end
 
-local function ScanTradeSkill()
+
+local function ScheduleTradeSkillRescan(delaySeconds)
+    pendingTradeSkillScan = {
+        time = GetTime() + (delaySeconds or 0.5)
+    }
+
+    delayedSender:SetScript("OnUpdate", function()
+        if pendingSend and GetTime() >= pendingSend.time then
+            pendingSend = nil
+            SendAllMyStoredProfessions(true)
+        end
+
+        if pendingTradeSkillScan and GetTime() >= pendingTradeSkillScan.time then
+            pendingTradeSkillScan = nil
+            ScanTradeSkill(true)
+        end
+
+        if pendingCraftScan and GetTime() >= pendingCraftScan.time then
+            pendingCraftScan = nil
+            ScanCraft(true)
+        end
+
+        if not pendingSend and not pendingTradeSkillScan and not pendingCraftScan then
+            delayedSender:SetScript("OnUpdate", nil)
+        end
+    end)
+end
+
+local function ScheduleCraftRescan(delaySeconds)
+    pendingCraftScan = {
+        time = GetTime() + (delaySeconds or 0.5)
+    }
+
+    delayedSender:SetScript("OnUpdate", function()
+        if pendingSend and GetTime() >= pendingSend.time then
+            pendingSend = nil
+            SendAllMyStoredProfessions(true)
+        end
+
+        if pendingTradeSkillScan and GetTime() >= pendingTradeSkillScan.time then
+            pendingTradeSkillScan = nil
+            ScanTradeSkill(true)
+        end
+
+        if pendingCraftScan and GetTime() >= pendingCraftScan.time then
+            pendingCraftScan = nil
+            ScanCraft(true)
+        end
+
+        if not pendingSend and not pendingTradeSkillScan and not pendingCraftScan then
+            delayedSender:SetScript("OnUpdate", nil)
+        end
+    end)
+end
+
+ScanTradeSkill = function(forceSend)
     local player = UnitName("player")
     local profession = GetTradeSkillLine()
+    local total = GetNumTradeSkills and GetNumTradeSkills() or 0
+    local freshRecipes = {}
+    local i, name, skillType, itemLink
 
     if not profession or profession == "" or profession == "UNKNOWN" then
         DebugMessage("no trade skill detected")
@@ -783,46 +1002,88 @@ local function ScanTradeSkill()
         return
     end
 
-    local db = GetCurrentProfilePlayers()
-    db[player] = db[player] or {}
-    db[player][profession] = {}
+    if total == 0 then
+        DebugMessage("trade skill window opened before recipes loaded for " .. profession)
+        ScheduleTradeSkillRescan(0.75)
+        return
+    end
 
-    local i
-    for i = 1, GetNumTradeSkills() do
-        local name, skillType = GetTradeSkillInfo(i)
+    for i = 1, total do
+        name, skillType = GetTradeSkillInfo(i)
         if name and skillType ~= "header" then
-            AddRecipe(player, profession, name)
-            if GetTradeSkillItemLink then
-                local itemLink = GetTradeSkillItemLink(i)
-                if itemLink then
-                    LearnRecipeItemLink(profession, name, itemLink)
-                end
+            name = NormalizeRecipeName(name)
+            if name and name ~= "" and not IsRecipeExcluded(profession, name) and not IsRecipeInvalid(profession, name) then
+                table.insert(freshRecipes, name)
             end
         end
     end
 
-    SendChunkedProfessionData(player, profession, false)
+    if table.getn(freshRecipes) == 0 then
+        DebugMessage("trade skill scan for " .. profession .. " returned no usable recipes")
+        ScheduleTradeSkillRescan(0.75)
+        return
+    end
+
+    local db = GetCurrentProfilePlayers()
+    db[player] = db[player] or {}
+    db[player][profession] = {}
+
+    for i = 1, table.getn(freshRecipes) do
+        name = freshRecipes[i]
+        AddRecipe(player, profession, name)
+        if GetTradeSkillItemLink then
+            itemLink = GetTradeSkillItemLink(i)
+            if itemLink then
+                LearnRecipeItemLink(profession, name, itemLink)
+            end
+        end
+    end
+
+    RebuildRecipeExport()
+    SendChunkedProfessionData(player, profession, forceSend and true or false)
+    if IsInGuild() then
+        SendGuildHello()
+    end
     if uiFrame and uiFrame:IsShown() then
         RefreshUI()
     end
 end
 
-local function ScanCraft()
+ScanCraft = function(forceSend)
     local player = UnitName("player")
     local profession = GetCraftDisplaySkillLine()
+    local total = GetNumCrafts and GetNumCrafts() or 0
+    local freshRecipes = {}
+    local i, name, craftType, itemLink
 
     if not profession or profession == "" or profession == "UNKNOWN" then
         DebugMessage("no craft skill detected")
         return
     end
 
-    recipeName = NormalizeRecipeName(recipeName)
-
     if IsProfessionExcluded(profession) then
         return
     end
 
-    if IsRecipeExcluded(profession, recipeName) or IsRecipeInvalid(profession, recipeName) then
+    if total == 0 then
+        DebugMessage("craft window opened before recipes loaded for " .. profession)
+        ScheduleCraftRescan(0.75)
+        return
+    end
+
+    for i = 1, total do
+        name, _, craftType = GetCraftInfo(i)
+        if name and craftType ~= "header" then
+            name = NormalizeRecipeName(name)
+            if name and name ~= "" and not IsRecipeExcluded(profession, name) and not IsRecipeInvalid(profession, name) then
+                table.insert(freshRecipes, name)
+            end
+        end
+    end
+
+    if table.getn(freshRecipes) == 0 then
+        DebugMessage("craft scan for " .. profession .. " returned no usable recipes")
+        ScheduleCraftRescan(0.75)
         return
     end
 
@@ -830,26 +1091,26 @@ local function ScanCraft()
     db[player] = db[player] or {}
     db[player][profession] = {}
 
-    local i
-    for i = 1, GetNumCrafts() do
-        local name, _, craftType = GetCraftInfo(i)
-        if name and craftType ~= "header" then
-            AddRecipe(player, profession, name)
-            if GetCraftItemLink then
-                local itemLink = GetCraftItemLink(i)
-                if itemLink then
-                    LearnRecipeItemLink(profession, name, itemLink)
-                end
+    for i = 1, table.getn(freshRecipes) do
+        name = freshRecipes[i]
+        AddRecipe(player, profession, name)
+        if GetCraftItemLink then
+            itemLink = GetCraftItemLink(i)
+            if itemLink then
+                LearnRecipeItemLink(profession, name, itemLink)
             end
         end
     end
 
-    SendChunkedProfessionData(player, profession, false)
+    RebuildRecipeExport()
+    SendChunkedProfessionData(player, profession, forceSend and true or false)
+    if IsInGuild() then
+        SendGuildHello()
+    end
     if uiFrame and uiFrame:IsShown() then
         RefreshUI()
     end
 end
-
 
 local function SplitSuspiciousRecipeString(str)
     if not str then
@@ -897,17 +1158,22 @@ local function ImportProfessionChunk(sender, profession, recipeString, chunkInde
     end
 
     if recipeString and recipeString ~= "" then
-        local recipeName = NormalizeRecipeName(recipeString)
+        local recipeList = NormalizeRecipeList(recipeString)
+        local i, recipeName
 
-        if not IsRecipeExcluded(profession, recipeName) and not IsRecipeInvalid(profession, recipeName) then
-            if not RecipeExists(db[sender][profession], recipeName) then
-                table.insert(db[sender][profession], recipeName)
+        for i = 1, table.getn(recipeList) do
+            recipeName = NormalizeRecipeName(recipeList[i])
+            if recipeName and recipeName ~= "" and not IsRecipeExcluded(profession, recipeName) and not IsRecipeInvalid(profession, recipeName) then
+                if not RecipeExists(db[sender][profession], recipeName) then
+                    table.insert(db[sender][profession], recipeName)
+                end
             end
         end
     end
 
     if isLast == "1" then
         DebugMessage("imported " .. profession .. " from " .. sender)
+        RebuildRecipeExport()
 
         if uiFrame and uiFrame:IsShown() then
             RefreshUI()
@@ -954,10 +1220,12 @@ local function GetProfessionIndex()
     -- Always seed the full recipe catalog first.
     if GuildCraftLib and GuildCraftLib.Catalog then
         for profession, recipes in pairs(GuildCraftLib.Catalog) do
-            index[profession] = index[profession] or {}
+            if not IsProfessionExcluded(profession) then
+                index[profession] = index[profession] or {}
 
-            for recipeName in pairs(recipes) do
-                index[profession][recipeName] = index[profession][recipeName] or {}
+                for recipeName in pairs(recipes) do
+                    index[profession][recipeName] = index[profession][recipeName] or {}
+                end
             end
         end
     end
@@ -967,7 +1235,8 @@ local function GetProfessionIndex()
         for profession, recipes in pairs(professions) do
             index[profession] = index[profession] or {}
 
-            for _, recipeName in ipairs(recipes) do
+            local recipeList = NormalizeRecipeList(recipes)
+            for _, recipeName in ipairs(recipeList) do
                 recipeName = NormalizeRecipeName(recipeName)
                 if recipeName and recipeName ~= "" then
                     index[profession][recipeName] = index[profession][recipeName] or {}
@@ -1799,7 +2068,8 @@ frame:SetScript("OnEvent", function()
         end
 
     elseif event == "TRADE_SKILL_SHOW" then
-        ScanTradeSkill()
+        ScanTradeSkill(false)
+        ScheduleTradeSkillRescan(0.75)
         if IsInGuild() then
             ScheduleGuildHello(2)
         end
@@ -1809,8 +2079,21 @@ frame:SetScript("OnEvent", function()
             RefreshUI()
         end
 
+    elseif event == "TRADE_SKILL_UPDATE" then
+        ScanTradeSkill(false)
+        if uiFrame and uiFrame:IsShown() then
+            RefreshUI()
+        end
+
     elseif event == "CRAFT_SHOW" then
-        ScanCraft()
+        ScanCraft(false)
+        ScheduleCraftRescan(0.75)
+        if uiFrame and uiFrame:IsShown() then
+            RefreshUI()
+        end
+
+    elseif event == "CRAFT_UPDATE" then
+        ScanCraft(false)
         if uiFrame and uiFrame:IsShown() then
             RefreshUI()
         end
@@ -1820,6 +2103,7 @@ frame:SetScript("OnEvent", function()
         refreshButtonTimer:SetScript("OnUpdate", nil)
 
         UpdateGuildRosterMetadata()
+        RebuildRecipeExport()
 
         if uiFrame and uiFrame.refreshButton then
             uiFrame.refreshButton:Enable()
@@ -1902,6 +2186,7 @@ SlashCmdList["GUILDCRAFT"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("/guildcraft profile")
         DEFAULT_CHAT_FRAME:AddMessage("/guildcraft cleanup")
         DEFAULT_CHAT_FRAME:AddMessage("/guildcraft clearlinks")
+        DEFAULT_CHAT_FRAME:AddMessage("/guildcraft rewrite")
         return
     end
 
@@ -1994,6 +2279,8 @@ SlashCmdList["GUILDCRAFT"] = function(msg)
     if msg == "cleanup" then
         local removedExcluded = RemoveExcludedRecipesFromDB()
         local removedBroken = RemoveBrokenRecipesFromDB()
+        SanitizeStoredRecipeNames()
+        RebuildRecipeExport()
         DEFAULT_CHAT_FRAME:AddMessage("GuildCraftDB: removed " .. (removedExcluded + removedBroken) .. " recipes from current profile")
         if uiFrame and uiFrame:IsShown() then
             RefreshUI()
@@ -2005,6 +2292,11 @@ SlashCmdList["GUILDCRAFT"] = function(msg)
         local profileMeta = GetCurrentProfileMeta()
         profileMeta.ItemLinks = {}
         DEFAULT_CHAT_FRAME:AddMessage("GuildCraftDB: cleared learned item links for current profile")
+        return
+    end
+
+    if msg == "rewrite" then
+        RewriteSavedVariablesNow()
         return
     end
 
@@ -2024,7 +2316,8 @@ SlashCmdList["GUILDCRAFT"] = function(msg)
     for player, professions in pairs(db) do
         for profession, recipes in pairs(professions) do
             if not IsProfessionExcluded(profession) then
-                for _, recipe in ipairs(recipes) do
+                local recipeList = NormalizeRecipeList(recipes)
+                for _, recipe in ipairs(recipeList) do
                     if string.find(SafeLower(recipe), query) then
                         DEFAULT_CHAT_FRAME:AddMessage(recipe .. " -> " .. GetColorizedPlayerName(player) .. " (" .. profession .. ")")
                         found = true

@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Lua compiled files
+*.luac
+
+# Logs
+*.log
+
+# WoW local files
+WTF/
+SavedVariables/
+
+# IDE
+.vscode/
+.idea/
+
+# temporary
+*.tmp
+*.bak
