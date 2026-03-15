@@ -1,4 +1,6 @@
-DEFAULT_CHAT_FRAME:AddMessage("GuildCraftSafeLib_hoverfix.lua loaded")
+if DEFAULT_CHAT_FRAME then
+    DEFAULT_CHAT_FRAME:AddMessage("GuildCraftSafeLib_hoverfix.lua loaded")
+end
 
 -- Auto-generated from AtlasLoot Crafting.lua + Spells.lua
 GuildCraftLib = GuildCraftLib or {}
@@ -1776,7 +1778,6 @@ GuildCraftSafeLib.CraftItems = {
     ["Blazing Rapier"] = 12777,
     ["Bleakwood Hew"] = 12769,
     ["Blight"] = 7959,
-    ["Blinding Powder"] = 5530,
     ["Blood Sausage"] = 3220,
     ["Blood Talon"] = 12795,
     ["Blood Tiger Breastplate"] = 19688,
@@ -1911,8 +1912,6 @@ GuildCraftSafeLib.CraftItems = {
     ["Corehound Belt"] = 19162,
     ["Corehound Boots"] = 16982,
     ["Corehound Gloves"] = 65038,
-    ["Corrosive Poison"] = 47408,
-    ["Corrosive Poison II"] = 47409,
     ["Corruption"] = 12782,
     ["Cosmic Headdress"] = 55518,
     ["Cosmic Leggings"] = 55521,
@@ -2485,12 +2484,6 @@ GuildCraftSafeLib.CraftItems = {
     ["Inlaid Mithril Cylinder Plans"] = 10713,
     ["Inlaid Thorium Hammer"] = 12772,
     ["Inscribed Runic Bracers"] = 61188,
-    ["Instant Poison"] = 6947,
-    ["Instant Poison II"] = 6949,
-    ["Instant Poison III"] = 6950,
-    ["Instant Poison IV"] = 8926,
-    ["Instant Poison V"] = 8927,
-    ["Instant Poison VI"] = 8928,
     ["Intricate Gyroscope Goggles"] = 61187,
     ["Invisibility Potion"] = 9172,
     ["Invulnerable Mail"] = 12641,
@@ -2597,9 +2590,6 @@ GuildCraftSafeLib.CraftItems = {
     ["Mighty Iron Hammer"] = 3492,
     ["Mighty Rage Potion"] = 13442,
     ["Mighty Troll's Blood Potion"] = 3826,
-    ["Mind-numbing Poison"] = 5237,
-    ["Mind-numbing Poison II"] = 6951,
-    ["Mind-numbing Poison III"] = 9186,
     ["Minor Healing Potion"] = 118,
     ["Minor Magic Resistance Potion"] = 3384,
     ["Minor Mana Potion"] = 2455,
@@ -3228,3 +3218,56 @@ GuildCraftSafeLib.EnchantItems = {
     ["Smoking Heart of the Mountain"] = 11811,
     ["Wizard Oil"] = 20750,
 }
+
+-- Permanent product resolution maps used by GuildCraftDB preview/tooltips.
+-- Keeps Catalog as recipe->spell and stores product item IDs separately.
+GuildCraftLib.ProductItemsBySpell = GuildCraftLib.ProductItemsBySpell or {}
+GuildCraftLib.ProductItemsByProfession = GuildCraftLib.ProductItemsByProfession or {}
+
+do
+    local bySpell = GuildCraftLib.ProductItemsBySpell
+    local byProfession = GuildCraftLib.ProductItemsByProfession
+    local craftLower = {}
+    local enchantLower = {}
+    local name, itemID, norm
+
+    if GuildCraftSafeLib and GuildCraftSafeLib.CraftItems then
+        for name, itemID in pairs(GuildCraftSafeLib.CraftItems) do
+            norm = GCDB_LibNormalize(name)
+            if norm and tonumber(itemID) then
+                craftLower[norm] = tonumber(itemID)
+            end
+        end
+    end
+    if GuildCraftSafeLib and GuildCraftSafeLib.EnchantItems then
+        for name, itemID in pairs(GuildCraftSafeLib.EnchantItems) do
+            norm = GCDB_LibNormalize(name)
+            if norm and tonumber(itemID) then
+                enchantLower[norm] = tonumber(itemID)
+            end
+        end
+    end
+
+    local professionName, recipeMap, recipeName, spellID, productID
+    for professionName, recipeMap in pairs(GuildCraftLib.Catalog or {}) do
+        if type(recipeMap) == "table" then
+            byProfession[professionName] = byProfession[professionName] or {}
+            for recipeName, spellID in pairs(recipeMap) do
+                norm = GCDB_LibNormalize(recipeName)
+                productID = nil
+                if norm then
+                    productID = craftLower[norm] or enchantLower[norm]
+                end
+                if productID then
+                    byProfession[professionName][recipeName] = productID
+                    if norm then
+                        byProfession[professionName][norm] = productID
+                    end
+                    if tonumber(spellID) then
+                        bySpell[tonumber(spellID)] = productID
+                    end
+                end
+            end
+        end
+    end
+end
