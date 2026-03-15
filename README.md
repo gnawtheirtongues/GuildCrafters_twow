@@ -8,7 +8,8 @@ GuildCraftDB is a Turtle WoW addon for sharing and browsing guild crafting recip
 - Recipe search by profession and crafter.
 - Collapsible recipe categories with a `Collapse/Expand` button.
 - Predefined profession category grouping (consistent across characters).
-- Recipe preview panel with tooltip-style green "Use/Equip" text when available.
+- Bottom-right preview hover only (top-right list hover disabled).
+- Recipe preview green text suppression for selected equipment categories (Blacksmithing/Engineering/Leatherworking/Tailoring rules).
 - Crafter online/offline listing.
 - SavedVariables export support.
 

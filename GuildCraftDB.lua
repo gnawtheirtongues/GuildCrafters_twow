@@ -1212,13 +1212,6 @@ local function ImportProfessionChunk(sender, profession, recipeString, chunkInde
             RebuildRecipeExport()
             if uiFrame and uiFrame:IsShown() then
                 RefreshUI()
-                for i = 1, table.getn(uiRows) do
-                    local row = uiRows[i]
-                    if row and row:IsVisible() and MouseIsOver(row) and row.data and row.data.rowType == "recipe" then
-                        ShowRecipeTooltip(row)
-                        break
-                    end
-                end
             end
         else
             SetSyncStatus("Sync in: ignored invalid " .. profession .. " from " .. sender)
@@ -3063,9 +3056,6 @@ local function CreateRecipeRow(parent, index)
     end)
 
     row:SetScript("OnEnter", function()
-        if row.data and row.data.rowType == "recipe" then
-            ShowRecipeTooltip(row)
-        end
     end)
 
     row:SetScript("OnLeave", function()
@@ -4144,14 +4134,6 @@ local function RequestGuildRosterRefresh()
             UpdateGuildRosterMetadata()
             if uiFrame and uiFrame:IsShown() then
                 RefreshUI()
-                local i
-                for i = 1, table.getn(uiRows) do
-                    local row = uiRows[i]
-                    if row and row:IsVisible() and MouseIsOver(row) and row.data and row.data.rowType == "recipe" then
-                        ShowRecipeTooltip(row)
-                        break
-                    end
-                end
             end
         end
     end)
@@ -5010,14 +4992,6 @@ frame:SetScript("OnEvent", function()
         end
         if uiFrame and uiFrame:IsShown() then
             RefreshUI()
-            local i
-            for i = 1, table.getn(uiRows) do
-                local row = uiRows[i]
-                if row and row:IsVisible() and MouseIsOver(row) and row.data and row.data.rowType == "recipe" then
-                    ShowRecipeTooltip(row)
-                    break
-                end
-            end
         end
     elseif event == "CHAT_MSG_ADDON" then
         local prefix = arg1
