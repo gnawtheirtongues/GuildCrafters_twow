@@ -242,6 +242,18 @@ local function MatchToken(text, pattern)
     end
     return nil
 end
+local function MetaEscapeToken(text)
+    local s = tostring(text or "")
+    s = string.gsub(s, "%%", "%%25")
+    s = string.gsub(s, "~", "%%7E")
+    return s
+end
+local function MetaUnescapeToken(text)
+    local s = tostring(text or "")
+    s = string.gsub(s, "%%7[Ee]", "~")
+    s = string.gsub(s, "%%25", "%%")
+    return s
+end
 local function SafePairs(tbl)
     if type(tbl) ~= "table" then
         return function() return nil end
@@ -877,6 +889,37 @@ local function SendChunkedProfessionData(player, profession, forceSend)
         return
     end
     local sentCount = 0
+    local metaCount = 0
+    local function SendRecipeMeta(recipeName)
+        if not recipeName or recipeName == "" then
+            return
+        end
+        local profileMeta = GetCurrentProfileMeta()
+        if not profileMeta or not profileMeta.RecipeMeta or not profileMeta.RecipeMeta[profession] then
+            return
+        end
+        local meta = profileMeta.RecipeMeta[profession][recipeName]
+        if not meta then
+            return
+        end
+        local clearPayload = "META~" .. player .. "~" .. profession .. "~" .. MetaEscapeToken(recipeName) .. "~CLEAR"
+        SendAddonMessage("GCDB", clearPayload, "GUILD")
+        metaCount = metaCount + 1
+        local r, reagent
+        for r = 1, table.getn(meta.reagents or {}) do
+            reagent = meta.reagents[r]
+            if reagent and reagent.name and reagent.name ~= "" then
+                local payload = "META~" .. player .. "~" .. profession
+                    .. "~" .. MetaEscapeToken(recipeName)
+                    .. "~R"
+                    .. "~" .. MetaEscapeToken(reagent.name)
+                    .. "~" .. tostring(reagent.required or 0)
+                    .. "~" .. MetaEscapeToken(reagent.icon or "")
+                SendAddonMessage("GCDB", payload, "GUILD")
+                metaCount = metaCount + 1
+            end
+        end
+    end
     local i
     for i = 1, total do
         local recipeName = recipes[i]
@@ -890,10 +933,11 @@ local function SendChunkedProfessionData(player, profession, forceSend)
         end
         local payload = "DATA~" .. player .. "~" .. profession .. "~" .. isFirst .. "~" .. isLast .. "~" .. recipeName
         SendAddonMessage("GCDB", payload, "GUILD")
+        SendRecipeMeta(recipeName)
         sentCount = sentCount + 1
     end
-    SetSyncStatus("Sync out: " .. profession .. " (" .. sentCount .. " msgs)")
-    DebugMessage("sent " .. profession .. " in " .. sentCount .. " recipe messages")
+    SetSyncStatus("Sync out: " .. profession .. " (" .. sentCount .. " data, " .. metaCount .. " meta)")
+    DebugMessage("sent " .. profession .. " in " .. sentCount .. " recipe messages and " .. metaCount .. " meta messages")
 end
 local function SendAllMyStoredProfessions(forceSend)
     local player = UnitName("player")
@@ -1219,6 +1263,89 @@ local function ImportProfessionChunk(sender, profession, recipeString, chunkInde
         end
         ClearImportBuffer(sender, profession)
     end
+end
+local function ImportRecipeMetaChunk(sender, playerName, profession, recipeToken, mode, reagentToken, requiredToken, iconToken)
+    sender = GetShortName(sender)
+    playerName = GetShortName(playerName)
+    if sender == "" or playerName == "" or sender ~= playerName then
+        return
+    end
+    profession = tostring(profession or "")
+    profession = string.gsub(profession, "^%s+", "")
+    profession = string.gsub(profession, "%s+$", "")
+    if profession == "" or IsProfessionExcluded(profession) then
+        return
+    end
+    local recipeName = NormalizeRecipeName(MetaUnescapeToken(recipeToken))
+    if not recipeName or recipeName == "" then
+        return
+    end
+
+    local profileMeta = GetCurrentProfileMeta()
+    profileMeta.RecipeMeta = profileMeta.RecipeMeta or {}
+    profileMeta.RecipeMeta[profession] = profileMeta.RecipeMeta[profession] or {}
+    local stored = profileMeta.RecipeMeta[profession][recipeName] or {
+        icon = nil,
+        title = recipeName,
+        requires = "",
+        description = "",
+        itemLink = "",
+        reagents = {},
+        updatedAt = time(),
+    }
+
+    if mode == "CLEAR" then
+        stored.reagents = {}
+        stored.updatedAt = time()
+        profileMeta.RecipeMeta[profession][recipeName] = stored
+        return
+    end
+    if mode ~= "R" then
+        return
+    end
+
+    local reagentName = NormalizeRecipeName(MetaUnescapeToken(reagentToken))
+    if not reagentName or reagentName == "" then
+        return
+    end
+    local required = tonumber(requiredToken) or 0
+    if required < 0 then
+        required = 0
+    end
+    local icon = MetaUnescapeToken(iconToken)
+    local i, r
+    for i = 1, table.getn(stored.reagents or {}) do
+        r = stored.reagents[i]
+        if r and r.name == reagentName then
+            r.required = required
+            if icon and icon ~= "" then
+                r.icon = icon
+            end
+            stored.updatedAt = time()
+            profileMeta.RecipeMeta[profession][recipeName] = stored
+            return
+        end
+    end
+    stored.reagents = stored.reagents or {}
+    table.insert(stored.reagents, {
+        name = reagentName,
+        icon = icon,
+        required = required,
+    })
+    stored.updatedAt = time()
+    profileMeta.RecipeMeta[profession][recipeName] = stored
+end
+local function HandleMetaAddonMessage(sender, message)
+    local _, _, playerName, profession, recipeToken, mode, reagentToken, requiredToken, iconToken =
+        string.find(message, "^META~([^~]+)~([^~]+)~([^~]+)~([^~]+)~([^~]*)~?([^~]*)~?([^~]*)$")
+    if not playerName or not profession or not recipeToken or not mode then
+        return false
+    end
+    ImportRecipeMetaChunk(sender, playerName, profession, recipeToken, mode, reagentToken, requiredToken, iconToken)
+    if uiFrame and uiFrame:IsShown() and selectedRecipeData and selectedRecipeData.profession == profession then
+        uiFrame:UpdatePreviewPanel()
+    end
+    return true
 end
 local function PruneNonGuildData()
     if not IsInGuild() then
@@ -2333,6 +2460,13 @@ local function ShouldHidePreviewGreenText(recipeName, professionName, descriptio
     end
     return false
 end
+local function IsPlaceholderIcon(iconPath)
+    local s = SafeLower(tostring(iconPath or ""))
+    if s == "" then
+        return true
+    end
+    return string.find(s, "questionmark", 1, true) ~= nil
+end
 local function BuildRequiresFromToolNames(toolA, toolB, toolC, toolD)
     local tools = {}
     local seen = {}
@@ -3274,7 +3408,7 @@ ShouldRunBulkMetaCache = function(professionName)
     return true
 end
 
-local function GetStoredRecipeMeta(professionName, recipeName)
+GetStoredRecipeMeta = function(professionName, recipeName)
     if not professionName or not recipeName then
         return nil
     end
@@ -3688,12 +3822,14 @@ local function BuildRecipePreviewData(recipeName, professionName)
     local link = GetSelectedRecipeLink(recipeName, professionName)
     local itemName, itemLink, _, _, _, _, _, _, equipLoc, texture
     local itemID = link and tonumber(MatchCapture(link, "item:(%d+)")) or nil
+    local resolvedItemID = itemID
     local lookupName = NormalizeRecipeLookupName(recipeName)
 
     if (not itemID) and professionName and professionName ~= "Enchanting" then
         local spellItemID = GetSafeLibItemIDBySpell(professionName, recipeName)
         if spellItemID and spellItemID > 0 then
             itemID = spellItemID
+            resolvedItemID = spellItemID
             link = BuildItemHyperlinkFromID(itemID, recipeName) or link
         end
     end
@@ -3702,6 +3838,7 @@ local function BuildRecipePreviewData(recipeName, professionName)
         local safeItemID = GetSafeLibItemID(lookupName)
         if safeItemID and safeItemID > 0 then
             itemID = safeItemID
+            resolvedItemID = safeItemID
             link = BuildItemHyperlinkFromID(itemID, recipeName) or link
         end
     end
@@ -3715,6 +3852,15 @@ local function BuildRecipePreviewData(recipeName, professionName)
     preview.title = itemName or recipeName
     preview.icon = texture
     preview.itemLink = NormalizeToItemHyperlink(itemLink or link, preview.title)
+    if (not resolvedItemID) and preview.itemLink then
+        resolvedItemID = tonumber(MatchCapture(preview.itemLink, "item:(%d+)"))
+    end
+    if (not preview.icon or preview.icon == "") and resolvedItemID and GetItemIcon then
+        local iconFromID = GetItemIcon(resolvedItemID)
+        if iconFromID and iconFromID ~= "" then
+            preview.icon = iconFromID
+        end
+    end
     preview.isEquippable = (equipLoc and equipLoc ~= "") and true or false
     if (not preview.itemLink or preview.itemLink == "") and itemID then
         preview.itemLink = BuildItemHyperlinkFromID(itemID, preview.title or recipeName)
@@ -4018,6 +4164,18 @@ local function BuildRecipePreviewData(recipeName, professionName)
             if linkTexture and linkTexture ~= "" then
                 preview.icon = linkTexture
             end
+            if (not preview.icon or preview.icon == "") and GetItemIcon then
+                local iconFromID = GetItemIcon(linkItemID)
+                if iconFromID and iconFromID ~= "" then
+                    preview.icon = iconFromID
+                end
+            end
+        end
+    end
+    if (not preview.icon or preview.icon == "") and resolvedItemID and GetItemIcon then
+        local iconFromID = GetItemIcon(resolvedItemID)
+        if iconFromID and iconFromID ~= "" then
+            preview.icon = iconFromID
         end
     end
     if not preview.icon or preview.icon == "" then
@@ -4038,7 +4196,7 @@ local function SchedulePreviewResolve(recipeName, professionName)
     if not recipeName or recipeName == "" then
         return
     end
-    if not professionName or professionName == "Enchanting" then
+    if not professionName then
         return
     end
 
@@ -4076,9 +4234,14 @@ local function SchedulePreviewResolve(recipeName, professionName)
         pendingPreviewResolve.attempts = (pendingPreviewResolve.attempts or 0) + 1
         local preview = BuildRecipePreviewData(pendingPreviewResolve.recipe, pendingPreviewResolve.profession)
         local desc = preview.description or ""
-        local unresolved = (desc == "")
-            or (desc == "No cached recipe description available.")
-            or (string.find(desc, "^Creates%s+") ~= nil)
+        local unresolvedDesc = false
+        if pendingPreviewResolve.profession ~= "Enchanting" then
+            unresolvedDesc = (desc == "")
+                or (desc == "No cached recipe description available.")
+                or (string.find(desc, "^Creates%s+") ~= nil)
+        end
+        local unresolvedIcon = IsPlaceholderIcon(preview.icon)
+        local unresolved = unresolvedDesc or unresolvedIcon
 
         if not unresolved then
             StopPreviewResolveTicker()
@@ -4416,8 +4579,6 @@ local function CreateUI()
 
         local recipeName = selectedRecipeData.recipe
         local professionName = selectedRecipeData.profession
-        local suppressGreenDescription = ShouldSuppressGreenDescription(recipeName, professionName, uiFrame and uiFrame.previewItemLink or nil, selectedRecipeData and selectedRecipeData.category or nil)
-
         GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
 
         if professionName ~= "Enchanting" then
@@ -4427,7 +4588,7 @@ local function CreateUI()
                     GameTooltip:SetHyperlink(safeItemLink)
                 end)
                 if okSafe then
-                    if professionName ~= "Enchanting" and not suppressGreenDescription and uiFrame and uiFrame.previewDescription then
+                    if professionName ~= "Enchanting" and uiFrame and uiFrame.previewDescription then
                         local fromHover = GetPreferredDescriptionFromTooltipFrame(GameTooltip)
                         if fromHover and fromHover ~= "" and not string.find(fromHover, "^Creates%s+") then
                             uiFrame.previewDescription:SetText(fromHover)
@@ -4449,7 +4610,7 @@ local function CreateUI()
                     GameTooltip:SetHyperlink(resolvedItemLink)
                 end)
                 if okResolved then
-                    if professionName ~= "Enchanting" and not suppressGreenDescription and uiFrame and uiFrame.previewDescription then
+                    if professionName ~= "Enchanting" and uiFrame and uiFrame.previewDescription then
                         local fromHover = GetPreferredDescriptionFromTooltipFrame(GameTooltip)
                         if fromHover and fromHover ~= "" and not string.find(fromHover, "^Creates%s+") then
                             uiFrame.previewDescription:SetText(fromHover)
@@ -4476,7 +4637,7 @@ local function CreateUI()
                 GameTooltip:SetHyperlink(link)
             end)
             if ok then
-                if professionName ~= "Enchanting" and not suppressGreenDescription and uiFrame and uiFrame.previewDescription then
+                if professionName ~= "Enchanting" and uiFrame and uiFrame.previewDescription then
                     local fromHover = GetPreferredDescriptionFromTooltipFrame(GameTooltip)
                     if fromHover and fromHover ~= "" and not string.find(fromHover, "^Creates%s+") then
                         uiFrame.previewDescription:SetText(fromHover)
@@ -4721,12 +4882,12 @@ local function CreateUI()
         end
 
         local preview = BuildRecipePreviewData(selectedRecipeData.recipe, selectedRecipeData.profession)
-        local suppressGreenDescription = ShouldSuppressGreenDescription(selectedRecipeData.recipe, selectedRecipeData.profession, preview.itemLink, selectedRecipeData.category)
-        local unresolvedDesc = (selectedRecipeData.profession ~= "Enchanting" and not suppressGreenDescription)
+        local unresolvedDesc = (selectedRecipeData.profession ~= "Enchanting")
             and ((preview.description or "") == ""
                 or (preview.description or "") == "No cached recipe description available."
                 or string.find((preview.description or ""), "^Creates%s+") ~= nil)
-        if unresolvedDesc then
+        local unresolvedIcon = IsPlaceholderIcon(preview.icon)
+        if unresolvedDesc or unresolvedIcon then
             SchedulePreviewResolve(selectedRecipeData.recipe, selectedRecipeData.profession)
         else
             StopPreviewResolveTicker()
@@ -4735,7 +4896,7 @@ local function CreateUI()
         f.previewRequires:SetText(preview.requires or "")
         local descText = preview.description or ""
         local didResolveDescription = false
-        if selectedRecipeData.profession ~= "Enchanting" and not suppressGreenDescription then
+        if selectedRecipeData.profession ~= "Enchanting" then
             local hoverDerivedText, hoverDerivedLink = GetPreferredDescriptionForRecipe(selectedRecipeData.recipe, selectedRecipeData.profession, preview.itemLink)
             if hoverDerivedText and hoverDerivedText ~= "" then
                 descText = hoverDerivedText
@@ -4746,10 +4907,6 @@ local function CreateUI()
         end
         if didResolveDescription then
             SaveStoredRecipeMeta(selectedRecipeData.profession, selectedRecipeData.recipe, preview)
-        end
-        if ShouldHidePreviewGreenText(selectedRecipeData.recipe, selectedRecipeData.profession, descText, preview.itemLink, selectedRecipeData.category) then
-            descText = ""
-            preview.description = ""
         end
         f.previewDescription:SetText(descText)
         f.previewItemLink = preview.itemLink
@@ -5020,6 +5177,11 @@ frame:SetScript("OnEvent", function()
             DebugMessage("received HELLO from " .. sender)
             ScheduleProfessionSend()
             return
+        end
+        if string.sub(message, 1, 5) == "META~" then
+            if HandleMetaAddonMessage(sender, message) then
+                return
+            end
         end
         local _, _, command, playerName, profession, chunkIndex, isLast, recipeString =
             string.find(message, "^([^~]+)~([^~]+)~([^~]+)~([^~]+)~([^~]+)~?(.*)$")
