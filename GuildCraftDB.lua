@@ -37,6 +37,9 @@ local BULK_META_CACHE_INTERVAL = 5
 local bulkMetaCacheJobs = {}
 local bulkMetaCacheTicker = CreateFrame("Frame")
 local previewResolveTicker = CreateFrame("Frame")
+local addonSendTicker = CreateFrame("Frame")
+local addonSendQueue = {}
+local addonSendNextTime = 0
 local uiFrame = nil
 local uiProfessionRows = {}
 local uiRows = {}
@@ -67,6 +70,8 @@ local RECIPE_ROW_HEIGHT = 20
 local PREVIEW_RESOLVE_INTERVAL = 0.25
 local PREVIEW_RESOLVE_MAX_ATTEMPTS = 60
 local ALWAYS_USE_PREDEFINED_CATEGORIES = true
+local SYNC_LOAD_RATE_MAX = 100
+local SYNC_LOAD_RATE_MIN = 1
 local function GetCurrentRealmName()
     local realm = GetRealmName and GetRealmName() or nil
     if not realm or realm == "" then
@@ -277,11 +282,77 @@ local function EnsureMetaTables()
     GuildCraftDB_Meta.UI.Collapsed = GuildCraftDB_Meta.UI.Collapsed or {}
     GuildCraftDB_Meta.UI.Pos = GuildCraftDB_Meta.UI.Pos or {}
     GuildCraftDB_Meta.UI.Minimap = GuildCraftDB_Meta.UI.Minimap or { angle = 220, hide = false }
+    GuildCraftDB_Meta.UI.Settings = GuildCraftDB_Meta.UI.Settings or { SyncLoadRate = SYNC_LOAD_RATE_MAX }
     GuildCraftDB_Meta.Players = GuildCraftDB_Meta.Players or {}
     GuildCraftDB_Meta.Sync = GuildCraftDB_Meta.Sync or {}
     GuildCraftDB.Profiles = GuildCraftDB.Profiles or {}
     GuildCraftDB_Meta.Profiles = GuildCraftDB_Meta.Profiles or {}
     GuildCraftDB_Export.Profiles = GuildCraftDB_Export.Profiles or {}
+end
+local function GetUISettingsTable()
+    EnsureMetaTables()
+    GuildCraftDB_Meta.UI.Settings = GuildCraftDB_Meta.UI.Settings or {}
+    if not GuildCraftDB_Meta.UI.Settings.SyncLoadRate then
+        GuildCraftDB_Meta.UI.Settings.SyncLoadRate = SYNC_LOAD_RATE_MAX
+    end
+    return GuildCraftDB_Meta.UI.Settings
+end
+local function GetSyncLoadRate()
+    local settings = GetUISettingsTable()
+    local value = tonumber(settings.SyncLoadRate) or SYNC_LOAD_RATE_MAX
+    if value < SYNC_LOAD_RATE_MIN then
+        value = SYNC_LOAD_RATE_MIN
+    end
+    if value > SYNC_LOAD_RATE_MAX then
+        value = SYNC_LOAD_RATE_MAX
+    end
+    settings.SyncLoadRate = value
+    return value
+end
+local function SetSyncLoadRate(value)
+    local settings = GetUISettingsTable()
+    value = tonumber(value) or SYNC_LOAD_RATE_MAX
+    if value < SYNC_LOAD_RATE_MIN then
+        value = SYNC_LOAD_RATE_MIN
+    end
+    if value > SYNC_LOAD_RATE_MAX then
+        value = SYNC_LOAD_RATE_MAX
+    end
+    settings.SyncLoadRate = value
+end
+local function QueueGuildAddonPayload(payload)
+    if not payload or payload == "" then
+        return
+    end
+    local loadRate = GetSyncLoadRate()
+    if loadRate >= SYNC_LOAD_RATE_MAX then
+        SendAddonMessage("GCDB", payload, "GUILD")
+        return
+    end
+    table.insert(addonSendQueue, payload)
+    addonSendTicker:SetScript("OnUpdate", function()
+        if table.getn(addonSendQueue) == 0 then
+            addonSendTicker:SetScript("OnUpdate", nil)
+            return
+        end
+        local now = GetTime()
+        if now < addonSendNextTime then
+            return
+        end
+        addonSendNextTime = now + 0.20
+        local burst = math.floor(GetSyncLoadRate() / 10)
+        if burst < 1 then
+            burst = 1
+        end
+        local i
+        for i = 1, burst do
+            local nextPayload = table.remove(addonSendQueue, 1)
+            if not nextPayload then
+                break
+            end
+            SendAddonMessage("GCDB", nextPayload, "GUILD")
+        end
+    end)
 end
 local function IsProfessionExcluded(profession)
     if not profession then
@@ -903,7 +974,7 @@ local function SendChunkedProfessionData(player, profession, forceSend)
             return
         end
         local clearPayload = "META~" .. player .. "~" .. profession .. "~" .. MetaEscapeToken(recipeName) .. "~CLEAR"
-        SendAddonMessage("GCDB", clearPayload, "GUILD")
+        QueueGuildAddonPayload(clearPayload)
         metaCount = metaCount + 1
         local r, reagent
         for r = 1, table.getn(meta.reagents or {}) do
@@ -915,7 +986,7 @@ local function SendChunkedProfessionData(player, profession, forceSend)
                     .. "~" .. MetaEscapeToken(reagent.name)
                     .. "~" .. tostring(reagent.required or 0)
                     .. "~" .. MetaEscapeToken(reagent.icon or "")
-                SendAddonMessage("GCDB", payload, "GUILD")
+                QueueGuildAddonPayload(payload)
                 metaCount = metaCount + 1
             end
         end
@@ -932,7 +1003,7 @@ local function SendChunkedProfessionData(player, profession, forceSend)
             isLast = "1"
         end
         local payload = "DATA~" .. player .. "~" .. profession .. "~" .. isFirst .. "~" .. isLast .. "~" .. recipeName
-        SendAddonMessage("GCDB", payload, "GUILD")
+        QueueGuildAddonPayload(payload)
         SendRecipeMeta(recipeName)
         sentCount = sentCount + 1
     end
@@ -4335,6 +4406,104 @@ local function ToggleCollapseVisibleCategories()
     end
     RefreshUI()
 end
+local function UpdateSyncSettingsPanel()
+    if not uiFrame then
+        return
+    end
+    local value = GetSyncLoadRate()
+    if uiFrame.settingsSlider then
+        local current = math.floor((uiFrame.settingsSlider:GetValue() or 0) + 0.5)
+        if current ~= value then
+            uiFrame.settingsSlider:SetValue(value)
+        end
+    end
+    if uiFrame.settingsValueText then
+        uiFrame.settingsValueText:SetText("Current: " .. tostring(value) .. "/" .. tostring(SYNC_LOAD_RATE_MAX))
+    end
+end
+local function ToggleSyncSettingsPanel()
+    if not uiFrame or not uiFrame.settingsPanel then
+        return
+    end
+    if uiFrame.settingsPanel:IsShown() then
+        uiFrame.settingsPanel:Hide()
+    else
+        UpdateSyncSettingsPanel()
+        uiFrame.settingsPanel:Show()
+    end
+end
+local function CreateSyncSettingsControls(parentFrame, anchorButton)
+    local settingsButton = CreateFrame("Button", nil, parentFrame, "UIPanelButtonTemplate")
+    settingsButton:SetWidth(70)
+    settingsButton:SetHeight(22)
+    settingsButton:SetPoint("TOPLEFT", anchorButton, "BOTTOMLEFT", 0, -4)
+    settingsButton:SetText("Settings")
+    settingsButton:SetScript("OnClick", function()
+        ToggleSyncSettingsPanel()
+    end)
+    parentFrame.settingsButton = settingsButton
+
+    local settingsPanel = CreateFrame("Frame", nil, parentFrame)
+    settingsPanel:SetWidth(280)
+    settingsPanel:SetHeight(146)
+    settingsPanel:SetPoint("TOPLEFT", parentFrame, "TOPRIGHT", 12, -2)
+    settingsPanel:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true,
+        tileSize = 32,
+        edgeSize = 32,
+        insets = { left = 8, right = 8, top = 8, bottom = 8 }
+    })
+    settingsPanel:SetBackdropColor(0, 0, 0, 0.98)
+    settingsPanel:Hide()
+    parentFrame.settingsPanel = settingsPanel
+
+    local settingsTitle = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    settingsTitle:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 10, -8)
+    settingsTitle:SetText("Sync Load Settings")
+
+    local settingsHelp = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    settingsHelp:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 10, -26)
+    settingsHelp:SetWidth(260)
+    settingsHelp:SetJustifyH("LEFT")
+    settingsHelp:SetText("Lower values reduce login spikes by sending fewer sync messages per frame. 100 is current max behavior.")
+    settingsHelp:SetTextColor(0.72, 0.72, 0.72)
+
+    local slider = CreateFrame("Slider", "GuildCraftDB_SyncLoadSlider", settingsPanel, "OptionsSliderTemplate")
+    slider:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 14, -68)
+    slider:SetWidth(244)
+    slider:SetMinMaxValues(SYNC_LOAD_RATE_MIN, SYNC_LOAD_RATE_MAX)
+    slider:SetValueStep(1)
+    slider:SetValue(GetSyncLoadRate())
+    slider:SetScript("OnValueChanged", function()
+        local rounded = math.floor((slider:GetValue() or SYNC_LOAD_RATE_MAX) + 0.5)
+        SetSyncLoadRate(rounded)
+        addonSendNextTime = 0
+        UpdateSyncSettingsPanel()
+    end)
+    local lowText = getglobal("GuildCraftDB_SyncLoadSliderLow")
+    local highText = getglobal("GuildCraftDB_SyncLoadSliderHigh")
+    local titleText = getglobal("GuildCraftDB_SyncLoadSliderText")
+    if lowText then
+        lowText:SetText(tostring(SYNC_LOAD_RATE_MIN))
+    end
+    if highText then
+        highText:SetText(tostring(SYNC_LOAD_RATE_MAX))
+    end
+    if titleText then
+        titleText:SetText("Data Per Frame")
+    end
+    parentFrame.settingsSlider = slider
+
+    local settingsValueText = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    settingsValueText:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 4, -8)
+    settingsValueText:SetTextColor(0.95, 0.95, 0.95)
+    settingsValueText:SetText("")
+    parentFrame.settingsValueText = settingsValueText
+
+    UpdateSyncSettingsPanel()
+end
 local function CreateUI()
     if uiFrame then
         return
@@ -4428,6 +4597,7 @@ local function CreateUI()
         ToggleCollapseVisibleCategories()
     end)
     f.collapseButton = collapseButton
+    CreateSyncSettingsControls(f, refreshButton)
     local syncStatusText = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     syncStatusText:SetPoint("TOPLEFT", f, "TOPLEFT", 18, -86)
     syncStatusText:SetText(syncStatusTextValue)

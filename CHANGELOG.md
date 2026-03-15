@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 Improvements:
 
+-Added Settings allowing you to reduce how much data is sent
+
+
+## 1.3.1
+
+Improvements:
+
 - Removed top-right recipe list hover tooltip behavior; hover interaction now stays in the bottom-right preview area only.
 - Added profession/category-based green text suppression in preview descriptions:
   - Blacksmithing: `Equipment`, `Other`
