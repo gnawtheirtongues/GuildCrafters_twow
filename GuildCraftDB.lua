@@ -24,14 +24,17 @@ frame:RegisterEvent("CHAT_MSG_ADDON")
 frame:RegisterEvent("GUILD_ROSTER_UPDATE")
 local DEBUG = false
 local SEND_COOLDOWN = 60
+local SEND_META_SYNC = false
 local RECIPE_SEPARATOR = "||"
 local pendingSend = nil
 local pendingGuildHello = nil
 local lastHelloTime = 0
 local pendingTradeSkillScan = nil
 local pendingCraftScan = nil
+local lastTradeSkillScanTime = 0
+local lastCraftScanTime = 0
 local pendingImportBuffers = {}
-local AUTO_BULK_META_CACHE = true
+local AUTO_BULK_META_CACHE = false
 local BULK_META_CACHE_LIMIT = 20
 local BULK_META_CACHE_INTERVAL = 5
 local bulkMetaCacheJobs = {}
@@ -247,6 +250,22 @@ local function MatchToken(text, pattern)
     end
     return nil
 end
+local function CoerceTextureValue(iconValue)
+    if iconValue == nil then
+        return nil
+    end
+    if type(iconValue) == "number" then
+        return iconValue
+    end
+    local s = tostring(iconValue or "")
+    if s == "" then
+        return nil
+    end
+    if string.find(s, "^%d+$") then
+        return tonumber(s)
+    end
+    return s
+end
 local function MetaEscapeToken(text)
     local s = tostring(text or "")
     s = string.gsub(s, "%%", "%%25")
@@ -324,11 +343,6 @@ local function QueueGuildAddonPayload(payload)
     if not payload or payload == "" then
         return
     end
-    local loadRate = GetSyncLoadRate()
-    if loadRate >= SYNC_LOAD_RATE_MAX then
-        SendAddonMessage("GCDB", payload, "GUILD")
-        return
-    end
     table.insert(addonSendQueue, payload)
     addonSendTicker:SetScript("OnUpdate", function()
         if table.getn(addonSendQueue) == 0 then
@@ -339,10 +353,13 @@ local function QueueGuildAddonPayload(payload)
         if now < addonSendNextTime then
             return
         end
-        addonSendNextTime = now + 0.20
-        local burst = math.floor(GetSyncLoadRate() / 10)
+        addonSendNextTime = now + 0.30
+        local burst = math.floor(GetSyncLoadRate() / 25)
         if burst < 1 then
             burst = 1
+        end
+        if burst > 2 then
+            burst = 2
         end
         local i
         for i = 1, burst do
@@ -1004,7 +1021,9 @@ local function SendChunkedProfessionData(player, profession, forceSend)
         end
         local payload = "DATA~" .. player .. "~" .. profession .. "~" .. isFirst .. "~" .. isLast .. "~" .. recipeName
         QueueGuildAddonPayload(payload)
-        SendRecipeMeta(recipeName)
+        if SEND_META_SYNC then
+            SendRecipeMeta(recipeName)
+        end
         sentCount = sentCount + 1
     end
     SetSyncStatus("Sync out: " .. profession .. " (" .. sentCount .. " data, " .. metaCount .. " meta)")
@@ -1082,15 +1101,15 @@ local function ScheduleProfessionSend()
     delayedSender:SetScript("OnUpdate", function()
         if pendingSend and GetTime() >= pendingSend.time then
             pendingSend = nil
-            SendAllMyStoredProfessions(true)
+            SendAllMyStoredProfessions(false)
         end
         if pendingTradeSkillScan and GetTime() >= pendingTradeSkillScan.time then
             pendingTradeSkillScan = nil
-            ScanTradeSkill(true)
+            ScanTradeSkill(false)
         end
         if pendingCraftScan and GetTime() >= pendingCraftScan.time then
             pendingCraftScan = nil
-            ScanCraft(true)
+            ScanCraft(false)
         end
         if not pendingSend and not pendingTradeSkillScan and not pendingCraftScan then
             delayedSender:SetScript("OnUpdate", nil)
@@ -1104,15 +1123,15 @@ local function ScheduleTradeSkillRescan(delaySeconds)
     delayedSender:SetScript("OnUpdate", function()
         if pendingSend and GetTime() >= pendingSend.time then
             pendingSend = nil
-            SendAllMyStoredProfessions(true)
+            SendAllMyStoredProfessions(false)
         end
         if pendingTradeSkillScan and GetTime() >= pendingTradeSkillScan.time then
             pendingTradeSkillScan = nil
-            ScanTradeSkill(true)
+            ScanTradeSkill(false)
         end
         if pendingCraftScan and GetTime() >= pendingCraftScan.time then
             pendingCraftScan = nil
-            ScanCraft(true)
+            ScanCraft(false)
         end
         if not pendingSend and not pendingTradeSkillScan and not pendingCraftScan then
             delayedSender:SetScript("OnUpdate", nil)
@@ -1126,15 +1145,15 @@ local function ScheduleCraftRescan(delaySeconds)
     delayedSender:SetScript("OnUpdate", function()
         if pendingSend and GetTime() >= pendingSend.time then
             pendingSend = nil
-            SendAllMyStoredProfessions(true)
+            SendAllMyStoredProfessions(false)
         end
         if pendingTradeSkillScan and GetTime() >= pendingTradeSkillScan.time then
             pendingTradeSkillScan = nil
-            ScanTradeSkill(true)
+            ScanTradeSkill(false)
         end
         if pendingCraftScan and GetTime() >= pendingCraftScan.time then
             pendingCraftScan = nil
-            ScanCraft(true)
+            ScanCraft(false)
         end
         if not pendingSend and not pendingTradeSkillScan and not pendingCraftScan then
             delayedSender:SetScript("OnUpdate", nil)
@@ -1142,6 +1161,11 @@ local function ScheduleCraftRescan(delaySeconds)
     end)
 end
 ScanTradeSkill = function(forceSend)
+    local now = GetTime()
+    if not forceSend and (now - lastTradeSkillScanTime) < 0.50 then
+        return
+    end
+    lastTradeSkillScanTime = now
     local player = UnitName("player")
     local profession = GetTradeSkillLine()
     local total = GetNumTradeSkills and GetNumTradeSkills() or 0
@@ -1190,15 +1214,19 @@ ScanTradeSkill = function(forceSend)
         StartBulkMetaCacheJob("trade", profession)
     end
     RebuildRecipeExport()
-    SendChunkedProfessionData(player, profession, forceSend and true or false)
     if IsInGuild() then
-        SendGuildHello()
+        ScheduleProfessionSend()
     end
     if uiFrame and uiFrame:IsShown() then
         RefreshUI()
     end
 end
 ScanCraft = function(forceSend)
+    local now = GetTime()
+    if not forceSend and (now - lastCraftScanTime) < 0.50 then
+        return
+    end
+    lastCraftScanTime = now
     local player = UnitName("player")
     local profession = GetCraftDisplaySkillLine()
     local total = GetNumCrafts and GetNumCrafts() or 0
@@ -1247,9 +1275,8 @@ ScanCraft = function(forceSend)
         StartBulkMetaCacheJob("craft", profession)
     end
     RebuildRecipeExport()
-    SendChunkedProfessionData(player, profession, forceSend and true or false)
     if IsInGuild() then
-        SendGuildHello()
+        ScheduleProfessionSend()
     end
     if uiFrame and uiFrame:IsShown() then
         RefreshUI()
@@ -1383,7 +1410,7 @@ local function ImportRecipeMetaChunk(sender, playerName, profession, recipeToken
     if required < 0 then
         required = 0
     end
-    local icon = MetaUnescapeToken(iconToken)
+    local icon = CoerceTextureValue(MetaUnescapeToken(iconToken))
     local i, r
     for i = 1, table.getn(stored.reagents or {}) do
         r = stored.reagents[i]
@@ -3529,7 +3556,7 @@ local function SaveStoredRecipeMeta(professionName, recipeName, preview)
     end
 
     local stored = {
-        icon = preview.icon,
+        icon = CoerceTextureValue(preview.icon),
         title = preview.title or recipeName,
         requires = preview.requires or "",
         description = descriptionText,
@@ -3544,7 +3571,7 @@ local function SaveStoredRecipeMeta(professionName, recipeName, preview)
         if r and r.name and r.name ~= "" then
             table.insert(stored.reagents, {
                 name = r.name,
-                icon = r.icon,
+                icon = CoerceTextureValue(r.icon),
                 required = r.required or 0,
             })
         end
@@ -3952,7 +3979,7 @@ local function BuildRecipePreviewData(recipeName, professionName)
     local storedMeta = GetStoredRecipeMeta(professionName, recipeName)
     if storedMeta then
         if (not preview.icon or preview.icon == "") and storedMeta.icon then
-            preview.icon = storedMeta.icon
+            preview.icon = CoerceTextureValue(storedMeta.icon)
         end
         if storedMeta.title and storedMeta.title ~= "" then
             preview.title = storedMeta.title
@@ -3974,7 +4001,7 @@ local function BuildRecipePreviewData(recipeName, professionName)
                 local owned = GetOwnedCountByName(r.name)
                 table.insert(preview.reagents, {
                     name = r.name,
-                    icon = r.icon,
+                    icon = CoerceTextureValue(r.icon),
                     required = r.required or 0,
                     owned = owned,
                     text = r.name .. " " .. tostring(owned or 0) .. "/" .. tostring(r.required or 0),
@@ -4311,8 +4338,7 @@ local function SchedulePreviewResolve(recipeName, professionName)
                 or (desc == "No cached recipe description available.")
                 or (string.find(desc, "^Creates%s+") ~= nil)
         end
-        local unresolvedIcon = IsPlaceholderIcon(preview.icon)
-        local unresolved = unresolvedDesc or unresolvedIcon
+        local unresolved = unresolvedDesc
 
         if not unresolved then
             StopPreviewResolveTicker()
@@ -5056,8 +5082,7 @@ local function CreateUI()
             and ((preview.description or "") == ""
                 or (preview.description or "") == "No cached recipe description available."
                 or string.find((preview.description or ""), "^Creates%s+") ~= nil)
-        local unresolvedIcon = IsPlaceholderIcon(preview.icon)
-        if unresolvedDesc or unresolvedIcon then
+        if unresolvedDesc then
             SchedulePreviewResolve(selectedRecipeData.recipe, selectedRecipeData.profession)
         else
             StopPreviewResolveTicker()
@@ -5086,14 +5111,10 @@ local function CreateUI()
             f.previewDescription:SetTextColor(0.25, 1.0, 0.25)
         end
         if f.previewIcon then
-            f.previewIcon:SetTexture(preview.icon)
+            f.previewIcon:SetTexture(nil)
         end
         if f.previewIconHit then
-            if preview.icon and preview.icon ~= "" then
-                f.previewIconHit:Show()
-            else
-                f.previewIconHit:Hide()
-            end
+            f.previewIconHit:Show()
         end
         if f.previewNameHit then
             f.previewNameHit:Show()
@@ -5281,10 +5302,6 @@ frame:SetScript("OnEvent", function()
         end
     elseif event == "TRADE_SKILL_SHOW" then
         ScanTradeSkill(false)
-        ScheduleTradeSkillRescan(0.75)
-        if IsInGuild() then
-            ScheduleGuildHello(2)
-        end
         if uiFrame and uiFrame:IsShown() then
             UpdateWindowTitle()
             RefreshUI()
@@ -5296,7 +5313,6 @@ frame:SetScript("OnEvent", function()
         end
     elseif event == "CRAFT_SHOW" then
         ScanCraft(false)
-        ScheduleCraftRescan(0.75)
         if uiFrame and uiFrame:IsShown() then
             RefreshUI()
         end
@@ -5527,4 +5543,8 @@ SlashCmdList["GUILDCRAFT"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("No recipes found for: " .. msg)
     end
 end
+
+
+
+
 

@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.3.3
+
+Improvements:
+
+- Added queued and throttled guild sync sending to reduce burst load when opening professions.
+- Reduced sync payload pressure by defaulting to recipe ownership sync (meta payload sync disabled).
+- Improved multi-profession stability by debouncing/rescheduling rapid sync scan paths.
+- Disabled automatic bulk metadata caching by default to reduce profession-open crash risk.
+- Disabled preview icon rendering to avoid invalid texture crashes/red-box artifacts; tooltip hover over the icon area remains active.
+
 ## 1.3.1
 
 Improvements:
@@ -62,3 +72,7 @@ Features:
 - Recipe sharing.
 - Recipe search.
 - Export database support.
+
+
+
+
